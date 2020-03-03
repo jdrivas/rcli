@@ -17,7 +17,7 @@ use std::time::Duration;
 use std::{error, fmt, io};
 use structopt::StructOpt;
 
-fn main() -> io::Result<()> {
+fn main() -> Result<()> {
     // Load Settings
     let mut settings = config::Config::default();
 
@@ -38,24 +38,43 @@ fn main() -> io::Result<()> {
         Err(e) => eprintln!("Config not a hashmap: {:?}", e),
     }
 
+    // First time through.
+    let opt = AppCmds::from_args();
+    // eprintln!("Options are: {:?}", opt);
+    match parse_exec(RootCommands::App(opt)).unwrap() {
+        ParseResult::Interactive => readloop(),
+        _ => Ok(()),
+    };
+
+    Ok(())
+}
+
+fn readloop() -> Result<()> {
     //
     // Prompt & Readline loop.
     let (tx, rx) = mpsc::channel();
     prompt_start_up(tx);
 
     // Set up read loop.
-    let rl = Arc::new(Interface::new("cli")?);
+    let rl = Arc::new(Interface::new("cli").unwrap());
     if let Err(e) = rl.set_prompt("cli> ") {
         eprintln!("Couldn't set prompt: {}", e)
     }
 
     loop {
         match rl.read_line_step(Some(Duration::from_millis(1000))) {
-            Ok(Some(ReadResult::Input(line))) => match parse_exec(line) {
-                Ok(ParseResult::Complete) => continue,
-                Ok(ParseResult::Exit) => break,
-                Err(e) => eprintln!("{}", e),
-            },
+            Ok(Some(ReadResult::Input(line))) => {
+                let words: Vec<&str> = line.split_whitespace().collect();
+                match ICmds::from_iter_safe(words) {
+                    Ok(opt) => match parse_exec(RootCommands::Interactive(opt)) {
+                        Ok(ParseResult::Interactive) => continue, // should not get here.
+                        Ok(ParseResult::Complete) => continue,
+                        Ok(ParseResult::Exit) => break,
+                        Err(e) => eprintln!("{}", e),
+                    },
+                    Err(e) => eprintln!("{}", e),
+                }
+            }
             // Check for a prompt update.
             Ok(None) => {
                 let mut p = None;
@@ -108,19 +127,43 @@ fn prompt_start_up(tx: mpsc::Sender<PromptUpdate>) {
     });
 }
 
-#[derive(StructOpt)]
+#[derive(Debug)]
+enum RootCommands {
+    App(AppCmds),
+    Interactive(ICmds),
+}
+
+#[derive(StructOpt, Debug)]
 #[structopt(name = "cli", version = "0.0.1", setting(AppSettings::NoBinaryName))]
-struct Cmds {
+struct ICmds {
     /// File name for configuration.
     #[structopt(short = "c", long = "config", default_value = "cli.yaml")]
     config: String,
 
     #[structopt(subcommand)]
-    subcmd: SubCommand,
+    subcmd: InteractiveCommands,
 }
 
-#[derive(StructOpt)]
-enum SubCommand {
+#[derive(Debug, StructOpt)]
+#[structopt(name = "cli-a", version = "0.0.1", setting(AppSettings::NoBinaryName))]
+struct AppCmds {
+    /// File name for configuration.
+    #[structopt(short = "c", long = "config", default_value = "cli.yaml")]
+    config: String,
+
+    #[structopt(subcommand)]
+    subcmd: RootSubcommand,
+}
+
+#[derive(StructOpt, Debug)]
+enum RootSubcommand {
+    Interactive,
+    #[structopt(flatten)]
+    InteractiveSubCommand(InteractiveCommands),
+}
+
+#[derive(StructOpt, Debug)]
+enum InteractiveCommands {
     /// End the program.
     #[structopt(name = "quit")]
     Quit,
@@ -129,13 +172,13 @@ enum SubCommand {
     HTTP(HTTPCmd),
 }
 
-#[derive(StructOpt)]
+#[derive(StructOpt, Debug)]
 struct HTTPCmd {
     #[structopt(subcommand)]
     subcmd: HTTPVerb,
 }
 
-#[derive(StructOpt)]
+#[derive(StructOpt, Debug)]
 enum HTTPVerb {
     /// Make an http get call.
     Get(HTTPArg),
@@ -143,7 +186,7 @@ enum HTTPVerb {
     Put(HTTPArg),
 }
 
-#[derive(StructOpt)]
+#[derive(StructOpt, Debug)]
 struct HTTPArg {
     uri: String,
     content: Vec<String>,
@@ -151,10 +194,20 @@ struct HTTPArg {
     method: attohttpc::Method,
 }
 
-fn parse_exec(l: String) -> Result<ParseResult> {
-    let words: Vec<&str> = l.split_whitespace().collect();
-    match Cmds::from_iter_safe(words)?.subcmd {
-        SubCommand::HTTP(v) => {
+fn parse_exec(opt: RootCommands) -> Result<ParseResult> {
+    match opt {
+        RootCommands::Interactive(c) => parse_interactive(c),
+        RootCommands::App(c) => parse_app(c),
+    }
+}
+
+fn parse_app(opt: AppCmds) -> Result<ParseResult> {
+    Ok(ParseResult::Interactive)
+}
+
+fn parse_interactive(opt: ICmds) -> Result<ParseResult> {
+    match opt.subcmd {
+        InteractiveCommands::HTTP(v) => {
             let mut args: HTTPArg;
             match v.subcmd {
                 HTTPVerb::Get(a) => {
@@ -176,13 +229,14 @@ fn parse_exec(l: String) -> Result<ParseResult> {
             println!("{:?}", resp);
             Ok(ParseResult::Complete)
         }
-        SubCommand::Quit => Ok(ParseResult::Exit),
+        InteractiveCommands::Quit => Ok(ParseResult::Exit),
     }
 }
 
 type Result<T> = std::result::Result<T, ParseError>;
 
 enum ParseResult {
+    Interactive,
     Complete,
     Exit,
 }

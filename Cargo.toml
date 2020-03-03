@@ -10,6 +10,5 @@ edition = "2018"
 linefeed = "0.6"
 config = "0.10"
 clap = "2.33"
-structopt = "0.3"
 chrono = "0.4"
 
