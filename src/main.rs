@@ -2,19 +2,15 @@ extern crate chrono;
 extern crate clap;
 extern crate config;
 extern crate linefeed;
-extern crate structopt;
 
 use chrono::Local;
-// use clap::Clap;
-// use clap::{App, AppSettings, Arg};
-use clap::AppSettings;
+use clap::{App, AppSettings, Arg};
 use linefeed::{Interface, ReadResult};
 use std::collections::HashMap;
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 use std::{error, fmt, io};
-use structopt::StructOpt;
 
 fn main() -> io::Result<()> {
     // Load Settings
@@ -78,7 +74,11 @@ fn main() -> io::Result<()> {
                 println!("Caught signal: {:?}", s);
                 continue;
             }
-            Err(e) => eprintln!("Failed on readline: {:?}", e),
+            Err(e) => eprintln!("Failed to readline: {:?}", e),
+            v => {
+                eprintln!("Readline step: {:?}", v);
+                continue;
+            }
         }
     }
     Ok(())
@@ -107,64 +107,33 @@ fn prompt_start_up(tx: mpsc::Sender<PromptUpdate>) {
     });
 }
 
-#[derive(StructOpt)]
-#[structopt(name = "cli", version = "0.0.1", setting(AppSettings::NoBinaryName))]
-struct Cmds {
-    /// File name for configuration.
-    #[structopt(short = "c", long = "config", default_value = "cli.yaml")]
-    config: String,
-
-    #[structopt(subcommand)]
-    subcmd: SubCommand,
-}
-
-#[derive(StructOpt)]
-enum SubCommand {
-    /// End the program.
-    #[structopt(name = "quit")]
-    Quit,
-
-    /// HTTP commands.
-    HTTP(HTTPCmd),
-}
-
-#[derive(StructOpt)]
-struct HTTPCmd {
-    #[structopt(subcommand)]
-    subcmd: HTTPVerb,
-}
-
-#[derive(StructOpt)]
-enum HTTPVerb {
-    #[structopt(name = "get")]
-    Get(HTTPArg),
-    #[structopt(name = "put")]
-    Put(HTTPArg),
-}
-
-#[derive(StructOpt)]
-struct HTTPArg {
-    arg: Vec<String>,
-}
-
 type Result<T> = std::result::Result<T, ParseError>;
 fn parse_exec(l: String) -> Result<ParseResult> {
+    //
+    // Build out command tree
+    // We're rebuilding this each time.
+    // It would be great not to.
+    let cmds = App::new("cli")
+        .setting(AppSettings::NoBinaryName)
+        .about("CLI - dmeo cli app in rust")
+        .version("0.0.1")
+        .subcommand(App::new("http").about("use http commands"))
+        .subcommand(App::new("quit").about("exit"));
+
     let words: Vec<&str> = l.split_whitespace().collect();
-    let matches = Cmds::from_iter_safe(words);
+    let matches = cmds.get_matches_from_safe(words);
     match matches {
-        Ok(c) => match c.subcmd {
-            SubCommand::HTTP(v) => {
-                match v.subcmd {
-                    HTTPVerb::Get(a) => {
-                        println!("HTTP get {:?}", a.arg.join(" "));
-                    }
-                    HTTPVerb::Put(a) => {
-                        println!("HTTP put {:?}", a.arg.join(" "));
-                    }
-                }
+        Ok(m) => match m.subcommand() {
+            ("http", Some(http_matches)) => {
+                println!("http command: {:?}", http_matches);
                 Ok(ParseResult::Complete)
             }
-            SubCommand::Quit => Ok(ParseResult::Exit),
+            ("quit", Some(_)) => Ok(ParseResult::Exit),
+            ("", None) => {
+                println!("empty command.");
+                Ok(ParseResult::Complete)
+            }
+            _ => unreachable!(),
         },
         Err(e) => match e.kind {
             clap::ErrorKind::VersionDisplayed => {
@@ -176,7 +145,7 @@ fn parse_exec(l: String) -> Result<ParseResult> {
                 Ok(ParseResult::Complete)
             }
             _ => {
-                eprintln!("Error: {}", e);
+                eprintln!("{}", e);
                 Ok(ParseResult::Complete)
             }
         },
