@@ -41,9 +41,9 @@ fn main() -> Result<()> {
 
     // First time through.
     match AppCmds::from_iter_safe(&env::args().collect::<Vec<String>>()[1..]) {
-        Ok(opt) => {
-            parse_app(opt)?;
-            ()
+        Ok(mut opt) => {
+            opt.history_path = Some(".qcli_history".to_string());
+            parse_app(opt).map(|_a| ())?
         }
         Err(e) => eprintln!("{}", e),
     }
@@ -51,20 +51,14 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-#[derive(StructOpt, Debug)]
-#[structopt(name = "cli", version = "0.0.1", setting(AppSettings::NoBinaryName))]
-struct ICmds {
-    /// File name for configuration.
-    #[structopt(short = "c", long = "config", default_value = "cli.yaml")]
-    config: String,
-
-    #[structopt(subcommand)]
-    subcmd: InteractiveCommands,
-}
+type HistoryPath = Option<String>;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "cli", version = "0.0.1", setting(AppSettings::NoBinaryName))]
 struct AppCmds {
+    #[structopt(skip)]
+    history_path: HistoryPath,
+
     /// File name for configuration.
     #[structopt(short = "c", long = "config", default_value = "cli.yaml")]
     config: String,
@@ -78,6 +72,17 @@ enum RootSubcommand {
     Interactive,
     #[structopt(flatten)]
     InteractiveSubCommand(InteractiveCommands),
+}
+
+#[derive(StructOpt, Debug)]
+#[structopt(name = "cli", version = "0.0.1", setting(AppSettings::NoBinaryName))]
+struct ICmds {
+    /// File name for configuration.
+    #[structopt(short = "c", long = "config", default_value = "cli.yaml")]
+    config: String,
+
+    #[structopt(subcommand)]
+    subcmd: InteractiveCommands,
 }
 
 #[derive(StructOpt, Debug)]
@@ -112,10 +117,14 @@ struct HTTPArg {
     method: attohttpc::Method,
 }
 
+// Parse and execute an AppCmds. This specifically sets up
+// the ability to run either a single command from InteractiveCmds
+// and return with a reswult, or to run an interactive loop
+// for commands from InteractiveCommands.
 fn parse_app(opt: AppCmds) -> Result<ParseResult> {
     match opt.subcmd {
         RootSubcommand::Interactive => {
-            readloop()?;
+            readloop(opt.history_path)?;
             Ok(ParseResult::Exit)
         }
         RootSubcommand::InteractiveSubCommand(c) => parse_interactive(c),
@@ -198,7 +207,9 @@ impl From<attohttpc::Error> for ParseError {
     }
 }
 
-fn readloop() -> Result<()> {
+// Interactive readloop functionality for ICmds.
+// This supports an asynchronous prompt update capability.
+fn readloop(p: HistoryPath) -> Result<()> {
     //
     // Prompt & Readline loop.
     let (tx, rx) = mpsc::channel();
@@ -210,14 +221,28 @@ fn readloop() -> Result<()> {
         eprintln!("Couldn't set prompt: {}", e)
     }
 
+    p.as_ref().map(|path| {
+        if let Err(e) = rl.load_history(&path) {
+            eprintln!("Failed to load history file {:?}: {}", path, e);
+        }
+    });
+
     loop {
         match rl.read_line_step(Some(Duration::from_millis(1000))) {
             Ok(Some(ReadResult::Input(line))) => {
                 let words: Vec<&str> = line.split_whitespace().collect();
+                rl.add_history_unique(words.join(" "));
                 match ICmds::from_iter_safe(words) {
                     Ok(opt) => match parse_interactive(opt.subcmd) {
                         Ok(ParseResult::Complete) => continue,
-                        Ok(ParseResult::Exit) => break,
+                        Ok(ParseResult::Exit) => {
+                            p.as_ref().map(|path| {
+                                if let Err(e) = rl.save_history(&path) {
+                                    eprintln!("Failed to save history file: {:} - {}", path, e);
+                                }
+                            });
+                            break;
+                        }
                         Err(e) => eprintln!("{}", e),
                     },
                     Err(e) => eprintln!("{}", e),
